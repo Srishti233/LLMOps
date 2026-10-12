@@ -1,6 +1,8 @@
 # Full development environment: training, tracking, data versioning, tests, lint.
 -r requirements-serve.txt
 mlflow==2.16.2
+sqlalchemy>=2.0.35,<2.1   # mlflow 2.16.2 breaks with SQLAlchemy 2.1+ (FallbackAsyncAdaptedQueuePool import)
+alembic==1.13.3
 pandas==2.2.2
 dvc==3.55.2
 pytest==8.3.3
