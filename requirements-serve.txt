@@ -1,0 +1,15 @@
+# Runtime dependencies of the API (also used by the Docker image). CPU-only PyTorch wheels.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.4.1
+transformers==4.44.2
+huggingface_hub==0.25.1
+peft==0.12.0
+accelerate==0.34.2
+numpy==1.26.4
+scipy==1.13.1
+pyyaml==6.0.2
+fastapi==0.115.0
+uvicorn==0.30.6
+pydantic==2.9.2
+prometheus-client==0.20.0
+mlflow-skinny==2.16.2

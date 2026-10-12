@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-api
+  labels: { app: llm-api }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: llm-api }
+  template:
+    metadata:
+      labels: { app: llm-api }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: /metrics
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      containers:
+        - name: api
+          image: llmops-lab-api:local        # build it, then: kind load docker-image llmops-lab-api:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - { name: MODEL_SOURCE, value: "auto" }   # no registry in-cluster -> local adapter if mounted, else base model
+            - { name: TORCH_NUM_THREADS, value: "2" }
+          resources:
+            requests: { cpu: "500m", memory: "2Gi" }
+            limits: { cpu: "2", memory: "4Gi" }
+          startupProbe:                      # first start downloads the model into the emptyDir: allow ~10 min
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 5
+            failureThreshold: 120
+          readinessProbe:                    # only receive traffic once the model is loaded
+            httpGet: { path: /ready, port: 8000 }
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /health, port: 8000 }
+            periodSeconds: 20
+            failureThreshold: 3
+          volumeMounts:
+            - { name: model-cache, mountPath: /app/models/hf_cache }
+            - { name: data, mountPath: /app/data }
+      volumes:
+        - name: model-cache
+          emptyDir: {}                       # swap for a PersistentVolumeClaim to keep the model between restarts
+        - name: data
+          emptyDir: {}

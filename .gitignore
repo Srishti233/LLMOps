@@ -1,0 +1,20 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+# local state (large or regenerated)
+mlflow.db
+mlruns/
+mlartifacts/
+.dvc-storage/
+models/hf_cache/
+models/adapters/
+models/merged/
+models/registry_downloads/
+data/monitoring.db
+data/monitoring.db-journal
+reports/*.json
+reports/*.html
+reports/*.jsonl
+.env

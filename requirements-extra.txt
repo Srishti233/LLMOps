@@ -1,0 +1,2 @@
+# Optional: adds an Evidently HTML drift report next to the built-in one (pip install -r requirements-extra.txt)
+evidently==0.4.33

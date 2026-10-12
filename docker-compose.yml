@@ -1,0 +1,83 @@
+# Usage: `make up` (creates the host directories first), or `docker compose up -d --build`.
+# Scale the API:  docker compose up -d --scale api=3
+name: llmops-lab
+
+services:
+  mlflow:
+    build: { context: ., target: mlflow }
+    image: llmops-lab-mlflow:local
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    environment: { HOME: /tmp }
+    command: >
+      mlflow server --host 0.0.0.0 --port 5000
+      --backend-store-uri sqlite:////workspace/mlflow.db
+      --default-artifact-root /workspace/mlruns --no-serve-artifacts
+    volumes:
+      - ./:/workspace
+    ports: ["5000:5000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health', timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  api:
+    build: { context: ., target: runtime }
+    image: llmops-lab-api:local
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"   # same uid as the host so bind-mounted dirs stay writable
+    environment:
+      HOME: /tmp
+      LLMOPS_HOME: /app
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MODEL_SOURCE: ${MODEL_SOURCE:-auto}          # auto | local | base
+      TORCH_NUM_THREADS: ${TORCH_NUM_THREADS:-2}
+    volumes:
+      - ./models/hf_cache:/app/models/hf_cache      # model cache (shared with the host, no re-download)
+      - ./models/production:/app/models/production:ro   # local fallback copy of the production adapter
+      - ./mlruns:/app/mlruns:ro                     # registry artifacts (paths are re-anchored automatically)
+      - ./data:/app/data                            # monitoring.db (request log + feedback)
+      - ./reports:/app/reports:ro                   # drift.json -> llm_drift_score gauge
+    expose: ["8000"]
+    depends_on:
+      mlflow: { condition: service_healthy }
+    deploy:
+      replicas: 2
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=4)"]
+      interval: 15s
+      timeout: 5s
+      retries: 30
+      start_period: 240s
+
+  nginx:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports: ["8080:80"]
+    depends_on:
+      api: { condition: service_started }
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports: ["9090:9090"]
+
+  grafana:
+    image: grafana/grafana:10.4.2
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports: ["3000:3000"]
+    depends_on: [prometheus]
+
+volumes:
+  prometheus_data:
+  grafana_data:

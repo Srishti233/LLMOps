@@ -1,0 +1,99 @@
+# Single source of truth for llmops-lab. Every script and service reads this file.
+project: llmops-lab
+seed: 42
+
+model:
+  base_name: Qwen/Qwen2.5-0.5B-Instruct   # any small HF causal LM with a chat template works
+  cache_dir: models/hf_cache
+  registry_name: llmops-lab-support
+  local_production_dir: models/production  # local fallback copy of the production adapter
+  adapters_dir: models/adapters
+  merged_dir: models/merged
+
+prompt:
+  dir: prompts
+  version: v1                              # v1 | v2 (override with env PROMPT_VERSION)
+
+data:
+  n_examples: 300
+  val_fraction: 0.15
+  train_file: data/train.jsonl
+  val_file: data/val.jsonl
+  feedback_train_file: data/feedback_train.jsonl
+  feedback_review_file: reports/feedback_review.jsonl
+  monitoring_db: data/monitoring.db
+
+lora:
+  r: 8
+  alpha: 16
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj]
+
+train:
+  warmup_ratio: 0.05
+  full:
+    epochs: 3
+    batch_size: 4
+    grad_accum: 2
+    lr: 2.0e-4
+    max_seq_len: 256
+    eval_steps: 25
+    logging_steps: 5
+  smoke:                                   # pipeline plumbing test, finishes in a few minutes on CPU
+    max_steps: 20
+    batch_size: 2
+    grad_accum: 1
+    lr: 2.0e-4
+    max_seq_len: 192
+    eval_steps: 10
+    logging_steps: 1
+    train_samples: 64
+    eval_samples: 16
+
+mlflow:
+  tracking_uri: sqlite:///mlflow.db        # env MLFLOW_TRACKING_URI overrides (compose uses http://mlflow:5000)
+  experiment: llmops-lab
+  artifact_root: mlruns
+  aliases:
+    candidate: candidate
+    production: production
+
+eval:
+  max_new_tokens: 64
+  num_samples: 40                          # full eval uses at most this many validation rows
+  smoke_samples: 8
+
+gate:
+  max_regression: 0.02                     # candidate may be at most this much worse than production
+  thresholds:                              # used for full runs
+    min_rouge_l: 0.35
+    min_keyword_match_rate: 0.30
+    max_avg_latency_s: 60
+    min_tokens_per_sec: 1.0
+  smoke_thresholds:                        # smoke runs only prove the plumbing works, not model quality
+    min_rouge_l: 0.05
+    min_keyword_match_rate: 0.0
+    max_avg_latency_s: 120
+    min_tokens_per_sec: 0.5
+
+serve:
+  max_prompt_chars: 4000
+  default_max_new_tokens: 128
+
+monitoring:
+  drift:
+    window: 200                            # most recent logged prompts compared with the reference
+    min_samples: 20
+    vocab_size: 50                         # small vocab + PSI bias correction => no false alarms (tested)
+    psi_threshold: 0.25
+    ks_pvalue_threshold: 0.01
+    js_threshold: 0.30
+    score_threshold: 0.40
+    report_html: reports/drift.html
+    report_json: reports/drift.json
+    evidently_html: reports/drift_evidently.html
+
+retrain:
+  drift_score_threshold: 0.40
+  negative_feedback_ratio: 0.40
+  min_feedback: 10

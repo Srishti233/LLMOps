@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AuroraSync Support (llmops-lab)</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #222; }
+  h1 { font-size: 1.3rem; }
+  #log { border: 1px solid #ddd; border-radius: 8px; padding: 1rem; min-height: 280px; max-height: 55vh; overflow-y: auto; background: #fafafa; }
+  .msg { margin: .6rem 0; white-space: pre-wrap; }
+  .user { color: #1a5fb4; } .bot { color: #222; } .meta { color: #888; font-size: .75rem; }
+  form { display: flex; gap: .5rem; margin-top: 1rem; }
+  input { flex: 1; padding: .6rem; border: 1px solid #bbb; border-radius: 6px; }
+  button { padding: .6rem 1rem; border: 0; border-radius: 6px; background: #1a5fb4; color: #fff; cursor: pointer; }
+  button.fb { background: #eee; color: #222; padding: .15rem .5rem; margin-right: .3rem; }
+  button:disabled { opacity: .5; cursor: default; }
+  #status { font-size: .85rem; color: #666; margin-top: .5rem; }
+</style>
+</head>
+<body>
+<h1>AuroraSync Support Assistant</h1>
+<div id="log"></div>
+<form id="form"><input id="prompt" placeholder="Ask a question, e.g. How do I reset my password?" autocomplete="off" required>
+<button id="send" type="submit">Send</button></form>
+<div id="status"></div>
+<script>
+const logEl = document.getElementById("log"), statusEl = document.getElementById("status");
+const addMsg = (cls, text) => { const d = document.createElement("div"); d.className = "msg " + cls; d.textContent = text; logEl.appendChild(d); logEl.scrollTop = logEl.scrollHeight; return d; };
+
+async function checkReady() {
+  try { const r = await fetch("/ready"); const j = await r.json();
+    statusEl.textContent = j.ready ? "Model: " + j.model_version + " | prompt " + j.prompt_version : "Model is loading..." + (j.error ? " (" + j.error + ")" : "");
+    if (!j.ready) setTimeout(checkReady, 3000);
+  } catch (e) { statusEl.textContent = "API not reachable"; }
+}
+checkReady();
+
+async function sendFeedback(requestId, rating, box) {
+  const r = await fetch("/feedback", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ request_id: requestId, rating }) });
+  box.textContent = r.ok ? "Thanks for the feedback (" + (rating === "up" ? "👍" : "👎") + ")" : "Could not save feedback";
+}
+
+document.getElementById("form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const input = document.getElementById("prompt"), send = document.getElementById("send");
+  const text = input.value.trim(); if (!text) return;
+  input.value = ""; send.disabled = true; addMsg("user", "You: " + text);
+  const pending = addMsg("bot", "...");
+  try {
+    const r = await fetch("/generate", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ prompt: text, max_new_tokens: 128, temperature: 0.2 }) });
+    if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
+    const j = await r.json();
+    pending.textContent = "Assistant: " + j.response;
+    const meta = document.createElement("div"); meta.className = "meta";
+    meta.textContent = j.latency_ms.toFixed(0) + " ms, " + j.tokens_generated + " tokens, model " + j.model_version + ", prompt " + j.prompt_version + "  ";
+    const box = document.createElement("span");
+    for (const [label, rating] of [["👍", "up"], ["👎", "down"]]) {
+      const b = document.createElement("button"); b.type = "button"; b.className = "fb"; b.textContent = label;
+      b.onclick = () => sendFeedback(j.request_id, rating, box); box.appendChild(b);
+    }
+    meta.appendChild(box); logEl.appendChild(meta); logEl.scrollTop = logEl.scrollHeight;
+  } catch (e) { pending.textContent = "Error: " + e.message; }
+  send.disabled = false; input.focus();
+});
+</script>
+</body>
+</html>
