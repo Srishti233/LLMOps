@@ -1,0 +1,156 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: "3.11"
+  TOKENIZERS_PARALLELISM: "false"
+  HF_HUB_DISABLE_TELEMETRY: "1"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ env.PYTHON_VERSION }}" }
+      - run: pip install ruff==0.6.9
+      - run: ruff check .
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "${{ env.PYTHON_VERSION }}"
+          cache: pip
+          cache-dependency-path: requirements-test.txt
+      - run: pip install -r requirements-test.txt
+      - run: python -m pytest
+
+  # smoke-train -> eval -> quality gate on the tiny dataset, then serve + traffic + drift end to end
+  pipeline:
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "${{ env.PYTHON_VERSION }}"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - run: pip install -r requirements.txt
+      - uses: actions/cache@v4
+        with:
+          path: models/hf_cache
+          key: hf-qwen2.5-0.5b-instruct-v1
+      - name: Dataset (+ DVC version)
+        run: make data
+      - name: Download base model
+        run: make download-model
+      - name: Smoke fine-tune (LoRA, tracked in MLflow)
+        run: make train-smoke
+      - name: Evaluate candidate
+        run: make eval-smoke
+      - name: Quality gate / promote
+        run: make promote
+      - name: Serve, send normal + shifted traffic, feedback, metrics, drift
+        run: |
+          make serve > serve.log 2>&1 &
+          python scripts/simulate_traffic.py --url http://localhost:8000 --normal 12 --shifted 6 --max-new-tokens 24 --wait 420
+          curl -sf http://localhost:8000/metrics | grep -E '^llm_(requests_total|feedback_total|tokens_generated_total)'
+          make drift
+          python scripts/check_and_retrain.py --dry-run
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports
+          path: |
+            reports/
+            serve.log
+          if-no-files-found: ignore
+      - name: Upload production adapter
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-model
+          path: models/production
+
+  docker:
+    needs: pipeline
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: production-model
+          path: models/production
+      - uses: actions/cache@v4
+        with:
+          path: models/hf_cache
+          key: hf-qwen2.5-0.5b-instruct-v1
+      - name: Build image
+        run: docker build -t llmops-lab-api:ci .
+      - name: Container smoke test (/health, /ready, /generate)
+        run: |
+          mkdir -p data reports models/hf_cache
+          docker run -d --name api -p 8000:8000 --user "$(id -u):$(id -g)" \
+            -v "$PWD/models:/app/models" -v "$PWD/data:/app/data" -v "$PWD/reports:/app/reports" \
+            -e MODEL_SOURCE=local llmops-lab-api:ci
+          for i in $(seq 1 90); do
+            curl -sf http://localhost:8000/ready >/dev/null && break
+            sleep 5
+          done
+          curl -sf http://localhost:8000/health
+          curl -sf -X POST http://localhost:8000/generate -H 'Content-Type: application/json' \
+            -d '{"prompt":"How do I reset my password?","max_new_tokens":32,"temperature":0}' | tee gen.json
+          python3 -c "import json; d=json.load(open('gen.json')); assert d['response'] and d['request_id'] and d['model_version'], d"
+      - name: Container logs
+        if: failure()
+        run: docker logs api
+
+  compose:
+    needs: pipeline
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: production-model
+          path: models/production
+      - uses: actions/cache@v4
+        with:
+          path: models/hf_cache
+          key: hf-qwen2.5-0.5b-instruct-v1
+      - name: Start the full stack (2 API replicas behind nginx)
+        run: |
+          mkdir -p data reports models/hf_cache mlruns
+          export HOST_UID=$(id -u) HOST_GID=$(id -g)
+          docker compose up -d --build --scale api=2
+          for i in $(seq 1 120); do
+            [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/ready)" = "200" ] && break
+            sleep 5
+          done
+      - name: Both replicas answer through nginx
+        run: |
+          for i in $(seq 1 20); do curl -sf http://localhost:8080/health | python3 -c "import sys,json; print(json.load(sys.stdin)['instance'])"; done | sort -u | tee instances.txt
+          test "$(wc -l < instances.txt)" -eq 2
+          curl -sf -X POST http://localhost:8080/generate -H 'Content-Type: application/json' \
+            -d '{"prompt":"Where can I download my invoice?","max_new_tokens":32,"temperature":0}'
+      - name: Prometheus, Grafana and MLflow are up
+        run: |
+          sleep 20
+          curl -sf http://localhost:9090/api/v1/targets | python3 -c "import sys,json; t=json.load(sys.stdin)['data']['activeTargets']; up=[x for x in t if x['labels'].get('job')=='llm-api' and x['health']=='up']; print('llm-api targets up:', len(up)); assert len(up)==2"
+          curl -sf http://localhost:3000/api/health
+          curl -sf http://localhost:5000/health
+      - name: Logs
+        if: failure()
+        run: docker compose logs --no-color | tail -200
