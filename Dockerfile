@@ -10,7 +10,7 @@ RUN pip install -r requirements-serve.txt
 # Stage 2: MLflow tracking server / model registry UI (used by docker compose as the `mlflow` service)
 FROM python:3.11-slim AS mlflow
 ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1 PYTHONUNBUFFERED=1
-RUN pip install mlflow==2.16.2
+RUN pip install mlflow==2.16.2 'sqlalchemy>=2.0.35,<2.1' alembic==1.13.3
 WORKDIR /workspace
 EXPOSE 5000
 
